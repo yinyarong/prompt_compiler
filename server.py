@@ -55,6 +55,20 @@ INTENT_KEYWORDS = {
     "create": ["create", "add", "build", "implement", "write", "generate", "make", "new"],
 }
 
+# Words safe to strip when they appear as the FIRST word of the cleaned text,
+# because they duplicate the mapped action verb. Only single-word synonyms are
+# listed — phrasal-verb triggers like "clean up" are intentionally excluded so
+# stripping "clean" doesn't leave an orphaned "up".
+LEADING_STRIP_WORDS: dict[str, set[str]] = {
+    "fix":      {"fix", "repair"},
+    "refactor": {"refactor"},
+    "explain":  {"explain", "understand", "describe", "clarify"},
+    "test":     {"test"},
+    "delete":   {"delete", "remove", "drop", "eliminate"},
+    "read":     {"find", "show", "list", "get", "fetch", "view", "read"},
+    "create":   {"create", "add", "build", "implement", "make", "generate", "write"},
+}
+
 SPLIT_PATTERN = re.compile(
     r"\s+(?:and then|then|after that|also|next|finally|and)\s+",
     re.IGNORECASE,
@@ -118,7 +132,28 @@ SCAN_TARGETS = [
 
 
 def _strip_filler(text: str) -> str:
-    return FILLER_PATTERNS.sub("", text).strip()
+    cleaned = FILLER_PATTERNS.sub("", text)
+    # Collapse gaps left by removed words, then re-run so newly adjacent phrases
+    # (e.g. "i just need to" → "i need to" after "just" is removed) are also caught.
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    cleaned = FILLER_PATTERNS.sub("", cleaned)
+    cleaned = re.sub(r"\s{2,}", " ", cleaned).strip()
+    # Strip orphaned leading function words that survive both passes
+    cleaned = re.sub(r"^(i|to|the)\b\s*", "", cleaned, flags=re.IGNORECASE).strip()
+    return cleaned
+
+
+def _strip_leading_verb(clean: str, intent: str) -> str:
+    """Remove leading verb if it duplicates the mapped action verb phrase or a known synonym."""
+    # Check full multi-word verb first (e.g. "write tests for")
+    verb_phrase = INTENT_VERBS.get(intent, "").lower()
+    if clean.lower().startswith(verb_phrase):
+        return clean[len(verb_phrase):].strip()
+    # Check single-word synonyms
+    first_word = clean.split()[0] if clean else ""
+    if first_word.lower() in LEADING_STRIP_WORDS.get(intent, set()):
+        return clean[len(first_word):].strip()
+    return clean
 
 
 def _detect_intent(text: str) -> str:
@@ -217,6 +252,7 @@ async def compile_prompt(params: CompilePromptInput) -> str:
     try:
         intent = _detect_intent(params.raw_intent)
         clean = _strip_filler(params.raw_intent)
+        clean = _strip_leading_verb(clean, intent)
         verb = _action_verb(intent)
 
         cwd = os.getcwd()
@@ -294,6 +330,7 @@ async def split_task(params: SplitTaskInput) -> str:
                 continue
             intent = _detect_intent(chunk)
             clean = _strip_filler(chunk)
+            clean = _strip_leading_verb(clean, intent)
             verb = _action_verb(intent)
             steps.append(
                 {
