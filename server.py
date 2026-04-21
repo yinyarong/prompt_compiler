@@ -245,6 +245,8 @@ async def compile_prompt(params: CompilePromptInput) -> str:
                 "detected_intent": str,   # create/fix/refactor/explain/test/delete/read
                 "compiled_prompt": str,   # The final compact prompt
                 "char_count": int,
+                "worth_calling": bool,    # False = skipping this tool next time is fine
+                "skip_reason": str | None,# Human-readable explanation when worth_calling=False
                 "tips": list[str]
             }
             On error: {"error": str}
@@ -271,10 +273,32 @@ async def compile_prompt(params: CompilePromptInput) -> str:
 
         compiled = "\n".join(lines)
 
+        # --- worth_calling heuristic ---
+        # Measure noise removal: compare raw input length against the stripped
+        # content only (not the compiled output, which adds constraint lines).
+        raw_len = len(params.raw_intent)
+        compiled_len = len(compiled)
+        filler_matches = len(FILLER_PATTERNS.findall(params.raw_intent))
+        # `clean` is the de-noised content; savings = fraction of input that was filler
+        noise_ratio = (raw_len - len(clean)) / raw_len if raw_len > 0 else 0
+
+        skip_reason: str | None = None
+        if filler_matches == 0 and raw_len < 80 and not cache:
+            skip_reason = (
+                "Input is already concise with no filler and no project cache — "
+                "calling compile_prompt adds tool-call overhead without measurable benefit."
+            )
+        elif noise_ratio < 0.10 and raw_len < 80:
+            skip_reason = (
+                f"Only {noise_ratio:.0%} of the input was filler noise. "
+                "The tool-call cost likely exceeds the compression value."
+            )
+        worth_calling = skip_reason is None
+
         tips: list[str] = []
         if not cache:
             tips.append("Run scan_project first to auto-include your stack in compiled prompts.")
-        if len(params.raw_intent) > 200:
+        if raw_len > 200:
             tips.append("Consider using split_task to break this into smaller steps.")
         if intent == "create" and not params.scope:
             tips.append("Add a scope (e.g., 'src/auth.py') to make the prompt more precise.")
@@ -283,7 +307,9 @@ async def compile_prompt(params: CompilePromptInput) -> str:
             {
                 "detected_intent": intent,
                 "compiled_prompt": compiled,
-                "char_count": len(compiled),
+                "char_count": compiled_len,
+                "worth_calling": worth_calling,
+                "skip_reason": skip_reason,
                 "tips": tips,
             },
             indent=2,
